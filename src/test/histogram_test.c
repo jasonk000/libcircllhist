@@ -273,6 +273,36 @@ histogram_t *build(double *vals, int nvals) {
     hist_insert(out, vals[i], 1);
   return out;
 }
+
+void
+count_below_inclusive_many_test() {
+  double thresholds[] = { -2.0, -1.3, -1.2, -1.2, 0.0, 1.2, 10.0 };
+  uint64_t expected[] = { 0, 0, 2, 2, 5, 9, 14 };
+  uint64_t results[sizeof(thresholds) / sizeof(thresholds[0])];
+  histogram_t *hist = halloc();
+  int i;
+  int threshold_count = sizeof(thresholds) / sizeof(thresholds[0]);
+
+  hist_insert(hist, -1.23, 2);
+  hist_insert(hist, 0.0, 3);
+  hist_insert(hist, 1.23, 4);
+  hist_insert(hist, 10.0, 5);
+  hist_approx_count_below_inclusive_many(hist, thresholds, threshold_count, results);
+  for(i=0; i<threshold_count; i++)
+    isf(results[i] == expected[i], "threshold %g should return %" PRIu64,
+        thresholds[i], expected[i]);
+
+  for(i=0; i<threshold_count; i++)
+    isf(hist_approx_count_below_inclusive(hist, thresholds[i]) == results[i],
+        "threshold %g should match the single-threshold result", thresholds[i]);
+
+  hist_approx_count_below_inclusive_many(NULL, thresholds, threshold_count, results);
+  for(i=0; i<threshold_count; i++)
+    isf(results[i] == 0, "NULL histogram threshold %g should return 0", thresholds[i]);
+
+  hist_free(hist);
+}
+
 void mean_test(double *vals, int nvals, double expected) {
   histogram_t *h = build(vals, nvals);
   double m = hist_approx_mean(h);
@@ -887,6 +917,7 @@ int main() {
   T(is(0 == hist_approx_sum(NULL)));
   T(is(0 == hist_approx_count_below(NULL, 1)));
   T(is(0 == hist_approx_count_above(NULL, 1)));
+  T(count_below_inclusive_many_test());
 
 #define ADHOC_TEST(l, u, mode, pred, val) \
   do { \
