@@ -61,6 +61,34 @@ bool hists_equal(histogram_t *a, histogram_t *b) {
   }
   return true;
 }
+static int
+hist_decimal_exponent_old(double d) {
+  return (int)floor(log10(d));
+}
+
+static void
+hist_decimal_exponent_exhaustive_test(void) {
+  for (int exponent = -128; exponent <= 127; exponent++) {
+    for (int value = 10; value <= 99; value++) {
+      char decimal[64];
+      snprintf(decimal, sizeof(decimal), "%d.%de%d", value / 10,
+               value % 10, exponent);
+      double magnitude = strtod(decimal, NULL);
+      for (int sign = -1; sign <= 1; sign += 2) {
+        double input = sign * magnitude;
+        int expected = hist_decimal_exponent_old(fabs(input));
+        hist_bucket_t actual = double_to_hist_bucket(input);
+        if (expected >= -128 && expected <= 127 && actual.exp != expected) {
+          notokf("value=%g expected exponent=%d actual exponent=%d",
+                 input, expected, actual.exp);
+          return;
+        }
+      }
+    }
+  }
+  ok();
+}
+
 bool double_equals(double a, double b) {
   double r, diff, max = fabs(a);
   if(fabs(b) > max) max = fabs(b);
@@ -75,6 +103,7 @@ void bucket_tests() {
   hist_bucket_t b, o;
   char hbstr[HIST_BUCKET_MAX_STRING_SIZE] = {0};
 
+  T(hist_decimal_exponent_exhaustive_test());
   b = int_scale_to_hist_bucket(INT64_MIN, 1);
   T(is(b.val == -92 && b.exp == 19));
   b = int_scale_to_hist_bucket(INT64_MAX, 1);
