@@ -345,6 +345,21 @@ run_hist_approx_summary(const histogram_t *hist, const double *bounds, int bound
   return hist_approx_summary(hist, bounds, bound_count, results);
 }
 
+static hist_approx_summary_t
+run_hist_approx_summary_prepared(const histogram_t *hist, const double *bounds,
+                                 int bound_count, uint64_t *results, void *context) {
+  hist_prepared_bounds_t *prepared = hist_prepared_bounds_alloc(bounds, bound_count);
+  is(prepared != NULL);
+  if (!prepared) {
+    hist_approx_summary_t result = { .status = -1 };
+    return result;
+  }
+  hist_approx_summary_t result =
+      hist_approx_summary_prepared(hist, prepared, results, context);
+  hist_prepared_bounds_free(prepared);
+  return result;
+}
+
 void
 hist_approx_summary_test(summary_test_fn summarize, void *context) {
   int bound_count = sizeof(summary_test_bounds) / sizeof(summary_test_bounds[0]);
@@ -441,6 +456,88 @@ hist_approx_summary_api_test() {
   summary = hist_approx_summary(NULL, NULL, 0, NULL);
   is(summary.status == 0 && summary.sample_count == 0 && summary.sample_sum == 0.0 &&
      summary.sample_sum_squares == 0.0);
+}
+
+void
+hist_approx_summary_prepared_api_test() {
+  double unsorted[] = { 1.0, 0.0 };
+  is(hist_prepared_bounds_alloc(unsorted, 2) == NULL);
+  double nan_bounds[] = { 1.0, NAN };
+  is(hist_prepared_bounds_alloc(nan_bounds, 2) == NULL);
+}
+
+void
+hist_approx_summary_prepared_reuse_test() {
+  hist_prepared_bounds_t *prepared = hist_prepared_bounds_alloc(
+      summary_test_bounds,
+      sizeof(summary_test_bounds) / sizeof(summary_test_bounds[0]));
+  is(prepared != NULL);
+
+  histogram_t *hist = halloc();
+  for (int i = 0; i < 2 * DEFAULT_HIST_SIZE; ++i) {
+    int64_t value = 10 + (i % 90);
+    if (i % 2 == 0) value = -value;
+    hist_insert_intscale(hist, value, 3 + i / 90, i + 1);
+  }
+  is(hist_bucket_count(hist) > DEFAULT_HIST_SIZE);
+
+  int bound_count = sizeof(summary_test_bounds) / sizeof(summary_test_bounds[0]);
+  uint64_t expected_counts[sizeof(summary_test_bounds) / sizeof(summary_test_bounds[0])];
+  uint64_t prepared_counts[sizeof(summary_test_bounds) / sizeof(summary_test_bounds[0])];
+  hist_approx_summary_t expected = hist_approx_summary(
+      hist, summary_test_bounds, bound_count, expected_counts);
+  uint64_t out_of_bound_count = UINT64_MAX;
+  hist_approx_summary_t summary = hist_approx_summary_prepared(
+      hist, prepared, prepared_counts, &out_of_bound_count);
+  is(summary.status == expected.status);
+  is(summary.sample_count == expected.sample_count);
+  is(double_equals(summary.sample_sum, expected.sample_sum));
+  is(double_equals(summary.sample_sum_squares, expected.sample_sum_squares));
+  is(out_of_bound_count == 0);
+  for (int i = 0; i < bound_count; ++i)
+    isf(prepared_counts[i] == expected_counts[i],
+        "prepared bound %g should remain valid after histogram buckets move",
+        summary_test_bounds[i]);
+
+  hist_free(hist);
+  hist_prepared_bounds_free(prepared);
+}
+
+void
+hist_approx_summary_prepared_out_of_bound_test() {
+  double bounds[] = { -1.2, 0.0, 1.2 };
+  uint64_t expected[] = { 2, 5, 9 };
+  uint64_t results[3];
+  histogram_t *hist = halloc();
+  hist_insert(hist, -1.23, 2);
+  hist_insert(hist, 0.0, 3);
+  hist_insert(hist, 1.23, 4);
+  hist_insert(hist, 10.0, 5);
+  hist_insert(hist, NAN, 6);
+
+  hist_prepared_bounds_t *prepared = hist_prepared_bounds_alloc(bounds, 3);
+  uint64_t out_of_bound_count = 0;
+  is(prepared != NULL);
+  hist_approx_summary_t summary = hist_approx_summary_prepared(
+      hist, prepared, results, &out_of_bound_count);
+  is(summary.status == 0 && out_of_bound_count == 5);
+  for (size_t i = 0; i < 3; ++i)
+    isf(results[i] == expected[i],
+        "finite prepared bound %g should return %" PRIu64,
+        bounds[i], results[i]);
+
+  hist_prepared_bounds_free(prepared);
+
+  prepared = hist_prepared_bounds_alloc(NULL, 0);
+  out_of_bound_count = 0;
+  is(prepared != NULL);
+  summary = hist_approx_summary_prepared(
+      hist, prepared, NULL, &out_of_bound_count);
+  is(summary.status == 0 && summary.sample_count == 20);
+  is(out_of_bound_count == 14);
+  hist_prepared_bounds_free(prepared);
+
+  hist_free(hist);
 }
 
 void
@@ -1136,6 +1233,18 @@ int main() {
   T(hist_approx_summary_zero_bounds_test(run_hist_approx_summary, NULL));
   T(hist_approx_summary_saturation_test(run_hist_approx_summary, NULL));
   T(hist_approx_summary_api_test());
+
+  T(hist_approx_summary_test(run_hist_approx_summary_prepared, NULL));
+  T(hist_approx_summary_bounds_test(run_hist_approx_summary_prepared, NULL));
+  T(hist_approx_summary_zero_bounds_test(run_hist_approx_summary_prepared, NULL));
+  uint64_t prepared_out_of_bound_count = 0;
+  T(hist_approx_summary_saturation_test(
+      run_hist_approx_summary_prepared, &prepared_out_of_bound_count));
+  T(is(prepared_out_of_bound_count == 5));
+  T(hist_approx_summary_prepared_api_test());
+  T(hist_approx_summary_prepared_reuse_test());
+  T(hist_approx_summary_prepared_out_of_bound_test());
+
   T(count_below_inclusive_many_test());
 
 #define ADHOC_TEST(l, u, mode, pred, val) \
