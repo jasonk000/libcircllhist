@@ -119,6 +119,7 @@ static const hist_bucket_t hbnan = { (int8_t)0xff, 0 };
 
 #define MAX_HIST_BINS (2 + 2 * 90 * 256)
 #ifndef NDEBUG
+#define likely(x) (x)
 #define unlikely(x) (x)
 #define ASSERT_GOOD_HIST(h) do { \
   if(h) { \
@@ -129,8 +130,10 @@ static const hist_bucket_t hbnan = { (int8_t)0xff, 0 };
 #define ASSERT_GOOD_BUCKET(hb) assert(hist_bucket_is_valid(hb))
 #else
 #ifdef WIN32
+#define likely(x) (x)
 #define unlikely(x) (x)
 #else
+#define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
 #define ASSERT_GOOD_HIST(h)
@@ -524,22 +527,19 @@ int hist_bucket_cmp(hist_bucket_t h1, hist_bucket_t h2) {
   ASSERT_GOOD_BUCKET(h1);
   ASSERT_GOOD_BUCKET(h2);
   // checks if h1 < h2 on the real axis.
-  if(*(uint16_t *)&h1 == *(uint16_t *)&h2) return 0;
+  if(likely(*(uint16_t *)&h1 == *(uint16_t *)&h2)) return 0;
+  /* Positive and negative nonzero buckets share their ordering tree. */
+  if(likely((h1.val > 0 && h2.val > 0) ||
+            (h1.val <= -10 && h2.val <= -10))) {
+    if(h1.exp == h2.exp) return (h1.val < h2.val) ? 1 : -1;
+    if(h1.val < 0) return (h1.exp < h2.exp) ? -1 : 1;
+    return (h1.exp < h2.exp) ? 1 : -1;
+  }
   /* place NaNs at the beginning always */
   if(hist_bucket_isnan(h1)) return 1;
   if(hist_bucket_isnan(h2)) return -1;
-  /* zero values need special treatment */
-  if(h1.val == 0) return (h2.val > 0) ? 1 : -1;
-  if(h2.val == 0) return (h1.val < 0) ? 1 : -1;
-  /* opposite signs? */
-  if(h1.val < 0 && h2.val > 0) return 1;
-  if(h1.val > 0 && h2.val < 0) return -1;
-  /* here they are either both positive or both negative */
-  if(h1.exp == h2.exp) return (h1.val < h2.val) ? 1 : -1;
-  if(h1.exp > h2.exp) return (h1.val < 0) ? 1 : -1;
-  if(h1.exp < h2.exp) return (h1.val < 0) ? -1 : 1;
-  /* unreachable */
-  return 0;
+  /* Remaining valid, non-equal buckets are zero or opposite signs. */
+  return (h1.val < h2.val) ? 1 : -1;
 }
 
 double
