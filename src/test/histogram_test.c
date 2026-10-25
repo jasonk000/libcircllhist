@@ -1111,11 +1111,129 @@ diff_test() {
   hist_free(result);
 }
 
+static bool
+bucket_equal(hist_bucket_t first, hist_bucket_t second) {
+  return first.val == second.val && first.exp == second.exp;
+}
+
+static bool
+bucket_order_test(hist_bucket_t first, hist_bucket_t second, int expected) {
+  histogram_t *hist = hist_alloc();
+  hist_bucket_t actual;
+  uint64_t count;
+  bool result;
+
+  hist_insert_raw(hist, first, 1);
+  hist_insert_raw(hist, second, 1);
+  if (expected == 0) {
+    // expected = 0; equal: they should both go into one bucket
+    result = hist_bucket_count(hist) == 1;
+  } else if (hist_bucket_count(hist) == 2) {
+    // they did not go into same bucket; must be different
+    // confirm the 'actual' bucket in slot 0 matches per expected order
+    hist_bucket_idx_bucket(hist, 0, &actual, &count);
+    result = bucket_equal(actual, expected > 0 ? first : second) && count == 1;
+  } else {
+    result = false;
+  }
+  hist_free(hist);
+  return result;
+}
+
+struct bucket_cmp_case {
+  const char *name;
+  hist_bucket_t first;
+  hist_bucket_t second;
+  int expected;
+};
+
+static void
+bucket_cmp_table(void) {
+  const hist_bucket_t nan = { .val = -1, .exp = 0 };
+  const hist_bucket_t zero = { .val = 0, .exp = 0 };
+  const hist_bucket_t neg10e0 = { .val = -10, .exp = 0 };
+  const hist_bucket_t neg20e0 = { .val = -20, .exp = 0 };
+  const hist_bucket_t neg10e1 = { .val = -10, .exp = 1 };
+  const hist_bucket_t pos10e0 = { .val = 10, .exp = 0 };
+  const hist_bucket_t pos20e0 = { .val = 20, .exp = 0 };
+  const hist_bucket_t pos10e1 = { .val = 10, .exp = 1 };
+  const struct bucket_cmp_case cases[] = {
+    { "equal", pos10e0, pos10e0, 0 },
+    { "positive same exponent ascending", pos10e0, pos20e0, 1 },
+    { "positive same exponent descending", pos20e0, pos10e0, -1 },
+    { "positive exponent ascending", pos10e0, pos10e1, 1 },
+    { "positive exponent descending", pos10e1, pos10e0, -1 },
+    { "negative same exponent ascending", neg20e0, neg10e0, 1 },
+    { "negative same exponent descending", neg10e0, neg20e0, -1 },
+    { "negative exponent ascending", neg10e1, neg10e0, 1 },
+    { "negative exponent descending", neg10e0, neg10e1, -1 },
+    { "negative before positive", neg10e0, pos10e0, 1 },
+    { "positive after negative", pos10e0, neg10e0, -1 },
+    { "zero before positive", zero, pos10e0, 1 },
+    { "positive after zero", pos10e0, zero, -1 },
+    { "negative before zero", neg10e0, zero, 1 },
+    { "zero after negative", zero, neg10e0, -1 },
+    { "NaN before zero", nan, zero, 1 },
+    { "zero after NaN", zero, nan, -1 },
+    { "NaN before negative", nan, neg10e0, 1 },
+    { "negative after NaN", neg10e0, nan, -1 },
+    { "NaN before positive", nan, pos10e0, 1 },
+    { "positive after NaN", pos10e0, nan, -1 },
+    { "equal NaN", nan, nan, 0 },
+  };
+  bool table_ok = true;
+  for (size_t i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
+    if (!bucket_order_test(cases[i].first, cases[i].second, cases[i].expected)) {
+      table_ok = false;
+      printf("bucket comparison case failed: %s\n", cases[i].name);
+    }
+  }
+  isf(table_ok, "%zu direct comparison cases", sizeof(cases) / sizeof(*cases));
+
+}
+
+static void
+bucket_cmp_all_buckets(void) {
+  const hist_bucket_t nan = { .val = -1, .exp = 0 };
+  const hist_bucket_t zero = { .val = 0, .exp = 0 };
+
+  /* Build the expected order, including every mantissa and exponent edge. */
+  hist_bucket_t ordered[2 + 2 * 90 * 256];
+  size_t count = 0;
+  ordered[count++] = nan;
+  /* Negative values sort from the largest magnitude to the smallest. */
+  for (int exp = 127; exp >= -128; --exp)
+    for (int val = -99; val <= -10; ++val)
+      ordered[count++] = (hist_bucket_t) { .val = val, .exp = exp };
+  ordered[count++] = zero;
+  /* Positive values sort from the smallest magnitude to the largest. */
+  for (int exp = -128; exp <= 127; ++exp)
+    for (int val = 10; val <= 99; ++val)
+      ordered[count++] = (hist_bucket_t) { .val = val, .exp = exp };
+
+  /* Insert through the public API so the comparator controls the order. */
+  histogram_t *hist = hist_alloc();
+  for (size_t i = 0; i < count; ++i)
+    hist_insert_raw(hist, ordered[i], 1);
+  bool ordering_ok = count == sizeof(ordered) / sizeof(*ordered) &&
+                     hist_bucket_count(hist) == (int)count;
+  for (size_t i = 0; ordering_ok && i < count; ++i) {
+    hist_bucket_t actual;
+    uint64_t bucket_count;
+    hist_bucket_idx_bucket(hist, (int)i, &actual, &bucket_count);
+    ordering_ok = bucket_equal(actual, ordered[i]) && bucket_count == 1;
+  }
+  hist_free(hist);
+  isf(ordering_ok, "%zu valid buckets remain totally ordered", count);
+}
+
 int main() {
   struct timeval now;
   gettimeofday(&now, NULL);
   srand48(now.tv_sec ^ now.tv_usec);
   bucket_tests();
+  T(bucket_cmp_table());
+  T(bucket_cmp_all_buckets());
   T(test1(43.3, 43, 1));
   T(test1(99.9, 99, 1));
   T(test1(10, 10, 1));
