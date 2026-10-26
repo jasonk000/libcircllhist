@@ -330,22 +330,37 @@ histogram_t *build(double *vals, int nvals) {
   return out;
 }
 
+typedef hist_approx_summary_t (*summary_test_fn)(
+    const histogram_t *, const double *, int, uint64_t *, void *);
+
+static const double summary_test_bounds[] = {
+  -2.0, -1.2, 0.0, 1.2, 10.0, INFINITY
+};
+static const uint64_t summary_test_expected[] = { 0, 2, 5, 9, 14, 14 };
+
+static hist_approx_summary_t
+run_hist_approx_summary(const histogram_t *hist, const double *bounds, int bound_count,
+                        uint64_t *results, void *unused) {
+  (void)unused;
+  return hist_approx_summary(hist, bounds, bound_count, results);
+}
+
 void
-hist_approx_summary_test() {
-  double bounds[] = { -2.0, -1.2, 0.0, 1.2, 10.0, INFINITY };
-  uint64_t expected[] = { 0, 2, 5, 9, 14, 14 };
-  uint64_t results[sizeof(bounds) / sizeof(bounds[0])];
+hist_approx_summary_test(summary_test_fn summarize, void *context) {
+  int bound_count = sizeof(summary_test_bounds) / sizeof(summary_test_bounds[0]);
+  uint64_t results[sizeof(summary_test_bounds) / sizeof(summary_test_bounds[0])];
   histogram_t *hist = halloc();
-  hist_approx_summary_t summary;
 
   hist_insert(hist, -1.23, 2);
   hist_insert(hist, 0.0, 3);
   hist_insert(hist, 1.23, 4);
   hist_insert(hist, 10.0, 5);
+  hist_insert(hist, NAN, 6);
 
-  summary = hist_approx_summary(hist, bounds, sizeof(bounds) / sizeof(bounds[0]), results);
+  hist_approx_summary_t summary = summarize(
+      hist, summary_test_bounds, bound_count, results, context);
   is(summary.status == 0);
-  is(summary.sample_count == 14);
+  is(summary.sample_count == 20);
   is(double_equals(summary.sample_sum, hist_approx_sum(hist)));
   double expected_sum_squares =
       2 * pow(hist_bucket_midpoint(double_to_hist_bucket(-1.23)), 2) +
@@ -353,15 +368,74 @@ hist_approx_summary_test() {
       4 * pow(hist_bucket_midpoint(double_to_hist_bucket(1.23)), 2) +
       5 * pow(hist_bucket_midpoint(double_to_hist_bucket(10.0)), 2);
   is(double_equals(summary.sample_sum_squares, expected_sum_squares));
+  for (int i = 0; i < bound_count; ++i)
+    isf(results[i] == summary_test_expected[i],
+        "summary bound %g should return %" PRIu64,
+        summary_test_bounds[i], summary_test_expected[i]);
+
+  hist_free(hist);
+}
+
+void
+hist_approx_summary_bounds_test(summary_test_fn summarize, void *context) {
+  double bounds[] = { -INFINITY, -1.21, -1.2, -1.2, -1.19, 0.0, INFINITY };
+  uint64_t expected[] = { 0, 2, 2, 2, 2, 5, 14 };
+  uint64_t results[sizeof(bounds) / sizeof(bounds[0])];
+  histogram_t *hist = halloc();
+  hist_insert(hist, -1.23, 2);
+  hist_insert(hist, 0.0, 3);
+  hist_insert(hist, 1.23, 4);
+  hist_insert(hist, 10.0, 5);
+  hist_insert(hist, NAN, 6);
+
+  hist_approx_summary_t summary = summarize(
+      hist, bounds, sizeof(bounds) / sizeof(bounds[0]), results, context);
+  is(summary.status == 0);
+  is(summary.sample_count == 20);
   for (size_t i = 0; i < sizeof(bounds) / sizeof(bounds[0]); ++i)
-    isf(results[i] == expected[i], "summary bound %g should return %" PRIu64,
+    isf(results[i] == expected[i],
+        "summary edge bound %g should return %" PRIu64,
         bounds[i], expected[i]);
 
   hist_free(hist);
+}
 
+void
+hist_approx_summary_zero_bounds_test(summary_test_fn summarize, void *context) {
+  histogram_t *hist = halloc();
+  hist_insert(hist, 1.0, 2);
+  hist_insert(hist, NAN, 3);
+
+  hist_approx_summary_t summary = summarize(hist, NULL, 0, NULL, context);
+  is(summary.status == 0);
+  is(summary.sample_count == 5);
+  is(double_equals(summary.sample_sum, hist_approx_sum(hist)));
+
+  hist_free(hist);
+}
+
+void
+hist_approx_summary_saturation_test(summary_test_fn summarize, void *context) {
+  double bounds[] = { 1.0 };
+  uint64_t results[1];
+  histogram_t *hist = halloc();
+  hist_insert(hist, 1.0, UINT64_MAX);
+  hist_insert(hist, 10.0, 5);
+
+  hist_approx_summary_t summary = summarize(hist, bounds, 1, results, context);
+  is(summary.status == 0);
+  is(summary.sample_count == UINT64_MAX);
+  is(results[0] == UINT64_MAX);
+
+  hist_free(hist);
+}
+
+void
+hist_approx_summary_api_test() {
   double unsorted[] = { 1.0, 0.0 };
   uint64_t unsorted_results[2];
-  summary = hist_approx_summary(NULL, unsorted, 2, unsorted_results);
+  hist_approx_summary_t summary =
+      hist_approx_summary(NULL, unsorted, 2, unsorted_results);
   is(summary.status < 0);
 
   summary = hist_approx_summary(NULL, NULL, 0, NULL);
@@ -1057,7 +1131,11 @@ int main() {
   T(is(0 == hist_approx_sum(NULL)));
   T(is(0 == hist_approx_count_below(NULL, 1)));
   T(is(0 == hist_approx_count_above(NULL, 1)));
-  T(hist_approx_summary_test());
+  T(hist_approx_summary_test(run_hist_approx_summary, NULL));
+  T(hist_approx_summary_bounds_test(run_hist_approx_summary, NULL));
+  T(hist_approx_summary_zero_bounds_test(run_hist_approx_summary, NULL));
+  T(hist_approx_summary_saturation_test(run_hist_approx_summary, NULL));
+  T(hist_approx_summary_api_test());
   T(count_below_inclusive_many_test());
 
 #define ADHOC_TEST(l, u, mode, pred, val) \
